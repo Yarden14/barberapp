@@ -406,7 +406,7 @@ export default function Home() {
   };
 
   const sendWhatsAppReminder = (name: string, phone: string, price: number) => {
-    const text = `היי ${name}, מה קורה? ראיתי שעוד לא הספקת להעביר את ה-${price}₪ על התספורת, אשמח שתעביר לי בביט/פייבוקס כשמתפנה לך 🙏`;
+    const text = `מה קורה אחי אתה מעביר?`;
     const encodedText = encodeURIComponent(text);
     window.open(`https://wa.me/972${phone ? phone.substring(1) : ""}?text=${encodedText}`, "_blank");
   };
