@@ -48,6 +48,89 @@ const formatDateToYMD = (d: Date) => {
   return `${y}-${m}-${day}`;
 };
 
+interface MonthlyStat {
+  monthKey: string;
+  monthLabel: string;
+  totalRevenue: number;
+  totalAppointments: number;
+  newClientsCount: number;
+  newClientsDiff: number;
+}
+
+function calculateMonthlyStats(appointments: Appointment[]): MonthlyStat[] {
+  const clientFirstSeenMap = new Map<string, string>();
+  
+  // מיון תורים לפי תאריך
+  const sortedApps = [...appointments].sort((a, b) => 
+    (a.date || "").localeCompare(b.date || "")
+  );
+
+  // זיהוי תאריך ראשון של כל לקוח
+  sortedApps.forEach((app) => {
+    const clientId = app.phone 
+      ? app.phone.replace(/[^\d]/g, "") 
+      : (app.name || "").trim().toLowerCase();
+
+    if (clientId && app.date) {
+      if (!clientFirstSeenMap.has(clientId) || app.date < clientFirstSeenMap.get(clientId)!) {
+        clientFirstSeenMap.set(clientId, app.date);
+      }
+    }
+  });
+
+  // קיבוץ לפי חודשים
+  const monthlyMap = new Map<string, { revenue: number; count: number; newClientsSet: Set<string> }>();
+
+  sortedApps.forEach((app) => {
+    if (!app.date) return;
+    const monthKey = app.date.substring(0, 7); // YYYY-MM
+    const clientId = app.phone 
+      ? app.phone.replace(/[^\d]/g, "") 
+      : (app.name || "").trim().toLowerCase();
+
+    if (!monthlyMap.has(monthKey)) {
+      monthlyMap.set(monthKey, { revenue: 0, count: 0, newClientsSet: new Set() });
+    }
+
+    const current = monthlyMap.get(monthKey)!;
+    if (app.paid) {
+      current.revenue += Number(app.price) || 0;
+    }
+    current.count += 1;
+
+    const firstSeenDate = clientFirstSeenMap.get(clientId);
+    if (firstSeenDate && firstSeenDate.substring(0, 7) === monthKey) {
+      current.newClientsSet.add(clientId);
+    }
+  });
+
+  // חישוב הפרשים בין חודשים
+  const sortedMonthKeys = Array.from(monthlyMap.keys()).sort();
+  let previousMonthNewClients = 0;
+
+  const result: MonthlyStat[] = sortedMonthKeys.map((mKey) => {
+    const data = monthlyMap.get(mKey)!;
+    const newClientsCount = data.newClientsSet.size;
+    const diff = newClientsCount - previousMonthNewClients;
+    previousMonthNewClients = newClientsCount;
+
+    const [year, month] = mKey.split("-");
+    const dateObj = new Date(Number(year), Number(month) - 1, 1);
+    const monthLabel = dateObj.toLocaleDateString("he-IL", { month: "long", year: "numeric" });
+
+    return {
+      monthKey: mKey,
+      monthLabel,
+      totalRevenue: data.revenue,
+      totalAppointments: data.count,
+      newClientsCount,
+      newClientsDiff: diff,
+    };
+  });
+
+  return result.reverse();
+}
+
 // ניהול רשימת תורים שנערכו/נמחקו כדי למנוע יבוא חוזר מ-Google Calendar
 const getModifiedGCalKeys = (): string[] => {
   try {
