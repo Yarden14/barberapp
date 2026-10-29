@@ -39,7 +39,7 @@ export async function POST(req: Request) {
     }
 
     const events: Array<{ name: string; date: string; time: string; phone: string; service: string }> = [];
-    const cleanMyPhone = MY_PHONE_NUMBER.replace(/[- ]/g, "");
+    const cleanMyPhone = MY_PHONE_NUMBER.replace(/[^\d]/g, "");
 
     for (let i = 1; i < vevents.length; i++) {
       const block = vevents[i].split("END:VEVENT")[0];
@@ -58,10 +58,14 @@ export async function POST(req: Request) {
         let hours = "12";
         let minutes = "00";
 
+        let formattedDate = `${year}-${month}-${day}`;
+        let formattedTime = `${hours}:${minutes}`;
+
         if (rawDate.includes("T")) {
           const timePart = rawDate.split("T")[1];
           hours = timePart.substring(0, 2);
           minutes = timePart.substring(2, 4);
+          formattedTime = `${hours}:${minutes}`;
 
           if (rawDate.endsWith("Z")) {
             const utcDate = new Date(
@@ -74,29 +78,32 @@ export async function POST(req: Request) {
               )
             );
 
-            year = utcDate.getFullYear().toString();
-            month = String(utcDate.getMonth() + 1).padStart(2, "0");
-            day = String(utcDate.getDate()).padStart(2, "0");
-            hours = String(utcDate.getHours()).padStart(2, "0");
-            minutes = String(utcDate.getMinutes()).padStart(2, "0");
+            // המרה מפורשת לשעון ישראל בלבד (Asia/Jerusalem)
+            formattedDate = utcDate.toLocaleDateString("en-CA", {
+              timeZone: "Asia/Jerusalem",
+            });
+
+            formattedTime = utcDate.toLocaleTimeString("he-IL", {
+              timeZone: "Asia/Jerusalem",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            });
           }
         }
-
-        const formattedDate = `${year}-${month}-${day}`;
-        const formattedTime = `${hours}:${minutes}`;
 
         let phone = "";
         if (descriptionMatch) {
           const cleanDesc = descriptionMatch[1].replace(/\\n/g, " ").replace(/\\/g, "");
-          const foundPhones = cleanDesc.match(/(?:05\d[- ]?\d{7}|\+?972[- ]?5\d[- ]?\d{7}|\b0\d{8,9}\b)/g) || [];
+          const foundPhones = cleanDesc.match(/(?:05\d[ -]?\d{7}|\+?972[ -]?5\d[ -]?\d{7}|\b0\d{8,9}\b)/g) || [];
 
           const clientPhone = foundPhones.find(p => {
-            const cleaned = p.replace(/[- ]/g, "");
+            const cleaned = p.replace(/[^\d]/g, "");
             return cleanMyPhone !== "" && !cleaned.includes(cleanMyPhone) && !cleanMyPhone.includes(cleaned);
           });
 
           if (clientPhone) {
-            phone = clientPhone.replace(/[- ]/g, "");
+            phone = clientPhone.replace(/[^\d]/g, "");
           }
         }
 
