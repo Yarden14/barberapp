@@ -699,45 +699,47 @@ const parseIcalToIsraelTime = (dtStr: string) => {
 
         {/* תוכן הטאבים */}
         <main className="p-4 sm:p-6 flex-1">
-        {/* דוח ביצועים חודשי */}
-        <div className="mb-6 bg-gray-900 text-white rounded-2xl p-4 shadow-lg border border-gray-800">
-          <h2 className="text-xl font-bold mb-4 text-amber-400 text-right">📊 סיכום ביצועים חודשי</h2>
-          
-          <div className="space-y-4">
-            {calculateMonthlyStats(appointments).map((stat) => (
-              <div key={stat.monthKey} className="bg-gray-800/80 rounded-xl p-4 border border-gray-700/50">
-                <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-700">
-                  <span className="font-bold text-lg text-white">{stat.monthLabel}</span>
-                  <span className="text-emerald-400 font-extrabold text-lg">₪{stat.totalRevenue.toLocaleString()}</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="bg-gray-900/50 p-2.5 rounded-lg text-right">
-                    <span className="text-gray-400 block text-xs">סה"כ תורים</span>
-                    <span className="font-semibold text-white text-base">{stat.totalAppointments}</span>
+        {/* דוח ביצועים חודשי - מוצג רק בלשונית ביצועים / חודשי */}
+        {activeTab !== "today" && statsPeriod === "month" && (
+          <div className="mt-8 bg-gray-900 text-white rounded-2xl p-4 shadow-lg border border-gray-800">
+            <h2 className="text-xl font-bold mb-4 text-amber-400 text-right">📊 סיכום ביצועים חודשי</h2>
+            
+            <div className="space-y-4">
+              {calculateMonthlyStats(appointments).map((stat) => (
+                <div key={stat.monthKey} className="bg-gray-800/80 rounded-xl p-4 border border-gray-700/50">
+                  <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-700">
+                    <span className="font-bold text-lg text-white">{stat.monthLabel}</span>
+                    <span className="text-emerald-400 font-extrabold text-lg">₪{stat.totalRevenue.toLocaleString()}</span>
                   </div>
 
-                  <div className="bg-gray-900/50 p-2.5 rounded-lg text-right">
-                    <span className="text-gray-400 block text-xs">לקוחות חדשים</span>
-                    <div className="flex items-center justify-between mt-0.5">
-                      <span className="font-semibold text-white text-base">{stat.newClientsCount}</span>
-                      
-                      {stat.newClientsDiff !== 0 && (
-                        <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
-                          stat.newClientsDiff > 0 
-                            ? "bg-emerald-500/20 text-emerald-400" 
-                            : "bg-rose-500/20 text-rose-400"
-                        }`}>
-                          {stat.newClientsDiff > 0 ? `+${stat.newClientsDiff}` : stat.newClientsDiff} מחודש שעבר
-                        </span>
-                      )}
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="bg-gray-900/50 p-2.5 rounded-lg text-right">
+                      <span className="text-gray-400 block text-xs">סה"כ תורים</span>
+                      <span className="font-semibold text-white text-base">{stat.totalAppointments}</span>
+                    </div>
+
+                    <div className="bg-gray-900/50 p-2.5 rounded-lg text-right">
+                      <span className="text-gray-400 block text-xs">לקוחות חדשים</span>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <span className="font-semibold text-white text-base">{stat.newClientsCount}</span>
+                        
+                        {stat.newClientsDiff !== 0 && (
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                            stat.newClientsDiff > 0 
+                              ? "bg-emerald-500/20 text-emerald-400" 
+                              : "bg-rose-500/20 text-rose-400"
+                          }`}>
+                            {stat.newClientsDiff > 0 ? `+${stat.newClientsDiff}` : stat.newClientsDiff} מחודש שעבר
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
           {/* TAB 1: TODAY / CALENDAR */}
           {activeTab === "today" && (
             <div className="space-y-4">
