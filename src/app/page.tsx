@@ -185,7 +185,27 @@ export default function Home() {
     }
     setLoading(false);
   };
+// פונקציית עזר להמרת זמן מ-iCal לשעה ותאריך מדויקים בישראל
+const parseIcalToIsraelTime = (dtStr: string) => {
+   // חילוץ רכיבי התאריך והשעה מתוך DTSTART (למשל 20261029T143000Z)
+   const match = dtStr.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z?$/);
+   if (!match) return { dateStr: '', timeStr: dtStr };
 
+   const [, y, m, d, h, min, s] = match;
+   // יצירת תאריך UTC
+   const utcDate = new Date(Date.UTC(+y, +m - 1, +d, +h, +min, +s));
+
+   // המרה לתאריך ושעה מקומיים בישראל (Asia/Jerusalem)
+   const dateStr = utcDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }); // פורמט YYYY-MM-DD
+   const timeStr = utcDate.toLocaleTimeString('he-IL', {
+    timeZone: 'Asia/Jerusalem',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+   });
+
+   return { dateStr, timeStr };
+ };
   const autoSyncFromGCal = async (urlToSync: string, isManual: boolean = false) => {
     if (!urlToSync) {
       if (isManual) alert("אנא הזן קישור iCal בהגדרות תחילה.");
