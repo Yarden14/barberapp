@@ -956,8 +956,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
                 </div>
               )}
             </div>
-          )}
-{/* דוח ביצועים חודשי - מוצג מתחת לכפתורי המעבר */}
+          )}{/* דוח ביצועים חודשי - מוצג רק בלשונית ביצועים / חודשי */}
         {activeTab !== "today" && statsPeriod === "month" && (
           <div className="mt-8 bg-gray-900 text-white rounded-2xl p-4 shadow-lg border border-gray-800">
             <h2 className="text-xl font-bold mb-4 text-amber-400 text-right">📊 סיכום ביצועים חודשי</h2>
