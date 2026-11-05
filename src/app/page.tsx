@@ -60,11 +60,31 @@ const normalizeIsraeliPhone = (phone: string): string => {
   return digits;
 };
 
+// הוסף כאן את שם המספרה כדי להסירו מתחילת שם האירוע, למשל: ["המספרה שלי"]
+const SHOP_NAME_PREFIXES: string[] = [];
+
+// ניקוי שם לקוח מכותרת אירוע ביומן ("שם המספרה - שם הלקוח" -> "שם הלקוח")
+const cleanClientName = (name: string): string => {
+  const original = (name || "").trim();
+  let result = original;
+  for (const prefix of SHOP_NAME_PREFIXES) {
+    const p = prefix.trim().toLowerCase();
+    if (p && result.toLowerCase().startsWith(p)) {
+      result = result.substring(p.length).replace(/^[\s\-–—:|]+/, "");
+    }
+  }
+  const parts = result
+    .split(/\s+[-–—]\s+|\s*[:|]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : original;
+};
+
 // קישור וואטסאפ עם הודעת תזכורת תשלום (מחזיר null אם אין טלפון)
 const getWhatsAppLink = (phone: string, name: string, amount?: number): string | null => {
   const cleanPhone = normalizeIsraeliPhone(phone);
   if (!cleanPhone) return null;
-  const text = `היי ${name}, מה נשמע? תזכורת קטנה לגבי התשלום על התספורת${amount ? ` (₪${amount})` : ""} ✂️`;
+  const text = "מה קורה אחי אתה מעביר?";
   return `https://wa.me/${cleanPhone}?text=${encodeURIComponent(text)}`;
 };
 
@@ -91,7 +111,7 @@ function calculateMonthlyStats(appointments: Appointment[], todayStr: string): M
   sortedApps.forEach((app) => {
     const clientId = app.phone 
       ? app.phone.replace(/[^\d]/g, "") 
-      : (app.name || "").trim().toLowerCase();
+      : cleanClientName(app.name).toLowerCase();
 
     if (clientId && app.date) {
       if (!clientFirstSeenMap.has(clientId) || app.date < clientFirstSeenMap.get(clientId)!) {
@@ -108,7 +128,7 @@ function calculateMonthlyStats(appointments: Appointment[], todayStr: string): M
     const monthKey = app.date.substring(0, 7); // YYYY-MM
     const clientId = app.phone 
       ? app.phone.replace(/[^\d]/g, "") 
-      : (app.name || "").trim().toLowerCase();
+      : cleanClientName(app.name).toLowerCase();
 
     if (!monthlyMap.has(monthKey)) {
       monthlyMap.set(monthKey, { revenue: 0, count: 0, newClientsSet: new Set(), unpaidCount: 0, unpaidAmount: 0 });
@@ -586,7 +606,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
   const clientsMap = new Map<string, ClientSummary>();
 
   appointments.forEach(app => {
-    const rawName = app.name ? app.name.trim() : "";
+    const rawName = cleanClientName(app.name);
     if (!rawName) return;
 
     const key = rawName.toLowerCase().replace(/\s+/g, " ");
@@ -747,7 +767,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
         {/* תוכן הטאבים */}
         <main className="p-4 sm:p-6 flex-1">
           {/* התראה: תורים של היום שטרם שולמו */}
-          {todayUnpaid.length > 0 && (
+          {activeTab === "today" && todayUnpaid.length > 0 && (
             <div className="mb-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 space-y-3">
               <h3 className="font-bold text-amber-700 text-sm">
                 ⚠️ תורים להיום שטרם שולמו ({todayUnpaid.length})
@@ -758,7 +778,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
                 return (
                   <div key={app.id} className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="font-semibold text-gray-900 truncate">{app.name}</p>
+                      <p className="font-semibold text-gray-900 truncate">{cleanClientName(app.name)}</p>
                       <p className="text-xs text-gray-600">
                         {app.time} • ₪{app.price}
                       </p>
@@ -866,7 +886,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
                           <span className="font-bold text-gray-900">{app.time}</span>
                         </div>
                         <div>
-                          <h3 className="font-bold text-lg text-gray-900">{app.name}</h3>
+                          <h3 className="font-bold text-lg text-gray-900">{cleanClientName(app.name)}</h3>
                           <div className="flex items-center gap-2 text-sm text-gray-500">
                             <span>{app.service}</span>
                             <span>•</span>
