@@ -61,7 +61,7 @@ const normalizeIsraeliPhone = (phone: string): string => {
 };
 
 // הוסף כאן את שם המספרה כדי להסירו מתחילת שם האירוע, למשל: ["המספרה שלי"]
-const SHOP_NAME_PREFIXES: string[] = [];
+const SHOP_NAME_PREFIXES: string[] = ["[jordiko barbershop]", "jordiko barbershop"];
 
 // ניקוי שם לקוח מכותרת אירוע ביומן ("שם המספרה - שם הלקוח" -> "שם הלקוח")
 const cleanClientName = (name: string): string => {
@@ -73,6 +73,8 @@ const cleanClientName = (name: string): string => {
       result = result.substring(p.length).replace(/^[\s\-–—:|]+/, "");
     }
   }
+  // הסרת כל תגית בסוגריים מרובעים בתחילת הכותרת, למשל "[שם המספרה] שם הלקוח"
+  result = result.replace(/^\s*\[[^\]]*\]\s*[-–—:|]*\s*/, "");
   const parts = result
     .split(/\s+[-–—]\s+|\s*[:|]\s*/)
     .map((part) => part.trim())
