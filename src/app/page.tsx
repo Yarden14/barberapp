@@ -48,6 +48,26 @@ const formatDateToYMD = (d: Date) => {
   return `${y}-${m}-${day}`;
 };
 
+// המרת מספר טלפון ישראלי לפורמט בינלאומי (05X... -> 9725X...)
+const normalizeIsraeliPhone = (phone: string): string => {
+  let digits = (phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00972")) digits = digits.substring(2);
+  else if (digits.startsWith("972")) {
+    // כבר בפורמט בינלאומי
+  } else if (digits.startsWith("0")) digits = "972" + digits.substring(1);
+  else if (digits.length === 9 && digits.startsWith("5")) digits = "972" + digits;
+  return digits;
+};
+
+// קישור וואטסאפ עם הודעת תזכורת תשלום (מחזיר null אם אין טלפון)
+const getWhatsAppLink = (phone: string, name: string, amount?: number): string | null => {
+  const cleanPhone = normalizeIsraeliPhone(phone);
+  if (!cleanPhone) return null;
+  const text = `היי ${name}, מה נשמע? תזכורת קטנה לגבי התשלום על התספורת${amount ? ` (₪${amount})` : ""} ✂️`;
+  return `https://wa.me/${cleanPhone}?text=${encodeURIComponent(text)}`;
+};
+
 interface MonthlyStat {
   monthKey: string;
   monthLabel: string;
@@ -55,9 +75,11 @@ interface MonthlyStat {
   totalAppointments: number;
   newClientsCount: number;
   newClientsDiff: number;
+  unpaidCount: number;
+  unpaidAmount: number;
 }
 
-function calculateMonthlyStats(appointments: Appointment[]): MonthlyStat[] {
+function calculateMonthlyStats(appointments: Appointment[], todayStr: string): MonthlyStat[] {
   const clientFirstSeenMap = new Map<string, string>();
   
   // מיון תורים לפי תאריך
@@ -79,7 +101,7 @@ function calculateMonthlyStats(appointments: Appointment[]): MonthlyStat[] {
   });
 
   // קיבוץ לפי חודשים
-  const monthlyMap = new Map<string, { revenue: number; count: number; newClientsSet: Set<string> }>();
+  const monthlyMap = new Map<string, { revenue: number; count: number; newClientsSet: Set<string>; unpaidCount: number; unpaidAmount: number }>();
 
   sortedApps.forEach((app) => {
     if (!app.date) return;
@@ -89,12 +111,16 @@ function calculateMonthlyStats(appointments: Appointment[]): MonthlyStat[] {
       : (app.name || "").trim().toLowerCase();
 
     if (!monthlyMap.has(monthKey)) {
-      monthlyMap.set(monthKey, { revenue: 0, count: 0, newClientsSet: new Set() });
+      monthlyMap.set(monthKey, { revenue: 0, count: 0, newClientsSet: new Set(), unpaidCount: 0, unpaidAmount: 0 });
     }
 
     const current = monthlyMap.get(monthKey)!;
     if (app.paid) {
       current.revenue += Number(app.price) || 0;
+    } else if (app.date <= todayStr) {
+      // חוב פתוח נספר רק על תורים שכבר התקיימו (לא על תורים עתידיים)
+      current.unpaidCount += 1;
+      current.unpaidAmount += Number(app.price) || 0;
     }
     current.count += 1;
 
@@ -125,6 +151,8 @@ function calculateMonthlyStats(appointments: Appointment[]): MonthlyStat[] {
       totalAppointments: data.count,
       newClientsCount,
       newClientsDiff: diff,
+      unpaidCount: data.unpaidCount,
+      unpaidAmount: data.unpaidAmount,
     };
   });
 
@@ -360,7 +388,9 @@ const parseIcalToIsraelTime = (dtStr: string) => {
         }));
 
       if (newToInsert.length > 0) {
-        const { error: insertErr } = await supabase.from("appointments").insert(newToInsert);
+        const { error: insertErr } = await supabase
+          .from("appointments")
+          .upsert(newToInsert, { onConflict: "name,date,time", ignoreDuplicates: true });
         if (insertErr) {
           alert(`❌ שגיאה בהכנסת תורים ל-Supabase:\n${insertErr.message}`);
         } else {
@@ -408,6 +438,11 @@ const parseIcalToIsraelTime = (dtStr: string) => {
 
     if (error) {
       console.error("שגיאה בהוספת תור:", error);
+      if (error.code === "23505") {
+        alert("⚠️ תור עם אותו שם, תאריך ושעה כבר קיים.");
+      } else {
+        alert(`❌ שגיאה בהוספת התור:\n${error.message}`);
+      }
       fetchAppointments();
     } else if (data && data[0]) {
       fetchAppointments();
@@ -458,6 +493,11 @@ const parseIcalToIsraelTime = (dtStr: string) => {
 
     if (error) {
       console.error("שגיאה בעדכון תור:", error);
+      if (error.code === "23505") {
+        alert("⚠️ תור עם אותו שם, תאריך ושעה כבר קיים, ולכן העדכון לא נשמר.");
+      } else {
+        alert(`❌ שגיאה בעדכון התור:\n${error.message}`);
+      }
     }
 
     setEditingApp(null);
@@ -509,9 +549,12 @@ const parseIcalToIsraelTime = (dtStr: string) => {
   };
 
   const sendWhatsAppReminder = (name: string, phone: string, price: number) => {
-    const text = `מה קורה אחי אתה מעביר?`;
-    const encodedText = encodeURIComponent(text);
-    window.open(`https://wa.me/972${phone ? phone.substring(1) : ""}?text=${encodedText}`, "_blank");
+    const link = getWhatsAppLink(phone, name, price);
+    if (!link) {
+      alert("אין מספר טלפון ללקוח הזה.");
+      return;
+    }
+    window.open(link, "_blank");
   };
 
   const changeSelectedDate = (days: number) => {
@@ -642,6 +685,10 @@ const parseIcalToIsraelTime = (dtStr: string) => {
     return false;
   }).length;
 
+  const todayUnpaid = appointments
+    .filter(a => a.date === todayStr && !a.paid)
+    .sort((a, b) => a.time.localeCompare(b.time));
+
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col justify-between text-right font-sans pb-24" dir="rtl">
       <div className="w-full max-w-2xl mx-auto bg-gray-50 min-h-screen shadow-lg flex flex-col">
@@ -699,6 +746,50 @@ const parseIcalToIsraelTime = (dtStr: string) => {
 
         {/* תוכן הטאבים */}
         <main className="p-4 sm:p-6 flex-1">
+          {/* התראה: תורים של היום שטרם שולמו */}
+          {todayUnpaid.length > 0 && (
+            <div className="mb-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 space-y-3">
+              <h3 className="font-bold text-amber-700 text-sm">
+                ⚠️ תורים להיום שטרם שולמו ({todayUnpaid.length})
+              </h3>
+
+              {todayUnpaid.map((app) => {
+                const waLink = getWhatsAppLink(app.phone, app.name, app.price);
+                return (
+                  <div key={app.id} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-gray-900 truncate">{app.name}</p>
+                      <p className="text-xs text-gray-600">
+                        {app.time} • ₪{app.price}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {waLink && (
+                        <a
+                          href={waLink}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
+                        >
+                          <MessageCircle className="w-4 h-4" />
+                          <span>וואטסאפ</span>
+                        </a>
+                      )}
+                      <button
+                        onClick={() => togglePaid(app.id, app.paid)}
+                        className="bg-white border border-gray-300 text-gray-800 text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
+                      >
+                        <Check className="w-4 h-4 text-green-600" />
+                        <span>שולם</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* TAB 1: TODAY / CALENDAR */}
           {activeTab === "today" && (
             <div className="space-y-4">
@@ -957,12 +1048,12 @@ const parseIcalToIsraelTime = (dtStr: string) => {
               )}
             </div>
           )}{/* דוח ביצועים חודשי - מוצג רק בלשונית ביצועים / חודשי */}
-        {activeTab !== "today" && activeTab !== "clients" && statsPeriod === "month" && (
+        {activeTab === "stats" && statsPeriod === "month" && (
           <div className="mt-8 bg-gray-900 text-white rounded-2xl p-4 shadow-lg border border-gray-800">
             <h2 className="text-xl font-bold mb-4 text-amber-400 text-right">📊 סיכום ביצועים חודשי</h2>
             
             <div className="space-y-4">
-              {calculateMonthlyStats(appointments).map((stat) => (
+              {calculateMonthlyStats(appointments, todayStr).map((stat) => (
                 <div key={stat.monthKey} className="bg-gray-800/80 rounded-xl p-4 border border-gray-700/50">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-700">
                     <span className="font-bold text-lg text-white">{stat.monthLabel}</span>
@@ -992,6 +1083,12 @@ const parseIcalToIsraelTime = (dtStr: string) => {
                       </div>
                     </div>
                   </div>
+
+                  {stat.unpaidCount > 0 && (
+                    <div className="mt-3 pt-3 border-t border-gray-700 text-sm font-semibold text-rose-400 text-right">
+                      🚨 חובות פתוחים החודש: {stat.unpaidCount} תורים (₪{stat.unpaidAmount.toLocaleString()})
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -1100,7 +1197,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
                               <Phone className="w-4 h-4" />
                             </a>
                             <a
-                              href={`https://wa.me/972${client.phone.substring(1)}`}
+                              href={`https://wa.me/${normalizeIsraeliPhone(client.phone)}`}
                               target="_blank"
                               rel="noreferrer"
                               className="p-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors"
