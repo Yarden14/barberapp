@@ -4,7 +4,7 @@ import React, { useState, useEffect } from "react";
 import { 
   Calendar, Check, MessageCircle, UserPlus, DollarSign, Users, Clock, 
   Edit2, Plus, X, Trash2, TrendingUp, TrendingDown, BarChart3, ChevronLeft, ChevronRight, 
-  Phone, Search, ArrowUpDown, Sparkles, RefreshCw, Settings 
+  Phone, Search, ArrowUpDown, Sparkles, RefreshCw, Settings, AlertCircle 
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -205,7 +205,7 @@ const addModifiedGCalKey = (key: string) => {
 };
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"today" | "stats" | "clients">("today");
+  const [activeTab, setActiveTab] = useState<"today" | "stats" | "clients" | "debts">("today");
   
   const [defaultPrice, setDefaultPrice] = useState<number>(30);
   const [isEditingDefaultPrice, setIsEditingDefaultPrice] = useState<boolean>(false);
@@ -961,64 +961,6 @@ const parseIcalToIsraelTime = (dtStr: string) => {
           {/* TAB 2: STATS */}
           {activeTab === "stats" && (
             <div className="space-y-5">
-              {/* חייבים - כל התורים שעברו ולא שולמו */}
-              <div className="bg-white rounded-2xl p-4 shadow-sm border border-rose-200">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-gray-900 flex items-center gap-2">
-                    <span>🚨 חייבים</span>
-                    <span className="text-xs font-semibold text-gray-500">({pastUnpaid.length})</span>
-                  </h3>
-                  <div className="text-right">
-                    <span className="text-xs text-gray-500 block">סה״כ חוב פתוח</span>
-                    <span className="font-bold text-rose-600 text-lg">₪{pastUnpaidTotal.toLocaleString()}</span>
-                  </div>
-                </div>
-
-                {pastUnpaid.length === 0 ? (
-                  <p className="text-sm text-green-600 font-semibold">אין חובות פתוחים 🎉</p>
-                ) : (
-                  <div className="space-y-2 max-h-96 overflow-y-auto">
-                    {pastUnpaid.map((app) => {
-                      const waLink = getWhatsAppLink(app.phone, app.name, app.price);
-                      return (
-                        <div
-                          key={app.id}
-                          className="flex items-center justify-between gap-2 bg-gray-50 rounded-xl p-3 border border-gray-100"
-                        >
-                          <div className="min-w-0">
-                            <p className="font-semibold text-gray-900 truncate">{cleanClientName(app.name)}</p>
-                            <p className="text-xs text-gray-500">
-                              {app.date.split("-").reverse().join("/")} • {app.time} • ₪{app.price}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            {waLink && (
-                              <a
-                                href={waLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
-                              >
-                                <MessageCircle className="w-4 h-4" />
-                                <span>וואטסאפ</span>
-                              </a>
-                            )}
-                            <button
-                              onClick={() => togglePaid(app.id, app.paid)}
-                              className="bg-white border border-gray-300 text-gray-800 text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
-                            >
-                              <Check className="w-4 h-4 text-green-600" />
-                              <span>שולם</span>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
               <div className="flex justify-between items-center">
                 <div>
                   <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
@@ -1180,6 +1122,71 @@ const parseIcalToIsraelTime = (dtStr: string) => {
             </div>
           </div>
         )}
+          {/* TAB: DEBTS (חייבים) */}
+          {activeTab === "debts" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                    <AlertCircle className="w-6 h-6 text-rose-600" />
+                    <span>חייבים</span>
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-0.5">{pastUnpaid.length} תורים שטרם שולמו</p>
+                </div>
+                <div className="text-right">
+                  <span className="text-xs text-gray-500 block">סה״כ חוב פתוח</span>
+                  <span className="font-bold text-rose-600 text-2xl">₪{pastUnpaidTotal.toLocaleString()}</span>
+                </div>
+              </div>
+
+              {pastUnpaid.length === 0 ? (
+                <div className="bg-white rounded-2xl p-6 text-center shadow-sm border border-green-200">
+                  <p className="text-green-600 font-semibold">אין חובות פתוחים 🎉</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {pastUnpaid.map((app) => {
+                    const waLink = getWhatsAppLink(app.phone, app.name, app.price);
+                    return (
+                      <div
+                        key={app.id}
+                        className="flex items-center justify-between gap-2 bg-white rounded-xl p-3 shadow-sm border border-gray-100"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-900 truncate">{cleanClientName(app.name)}</p>
+                          <p className="text-xs text-gray-500">
+                            {app.date.split("-").reverse().join("/")} • {app.time} • ₪{app.price}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {waLink && (
+                            <a
+                              href={waLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
+                            >
+                              <MessageCircle className="w-4 h-4" />
+                              <span>וואטסאפ</span>
+                            </a>
+                          )}
+                          <button
+                            onClick={() => togglePaid(app.id, app.paid)}
+                            className="bg-white border border-gray-300 text-gray-800 text-xs font-semibold px-3 py-2 rounded-lg flex items-center gap-1"
+                          >
+                            <Check className="w-4 h-4 text-green-600" />
+                            <span>שולם</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* TAB 3: CLIENTS */}
           {activeTab === "clients" && (
             <div className="space-y-4">
@@ -1641,6 +1648,23 @@ const parseIcalToIsraelTime = (dtStr: string) => {
           >
             <Users className="w-5 h-5" />
             לקוחות
+          </button>
+
+          <button
+            onClick={() => setActiveTab("debts")}
+            className={`flex flex-col items-center gap-1 p-1 w-full text-xs font-semibold ${
+              activeTab === "debts" ? "text-black font-bold" : "text-gray-400"
+            }`}
+          >
+            <span className="relative">
+              <AlertCircle className="w-5 h-5" />
+              {pastUnpaid.length > 0 && (
+                <span className="absolute -top-1.5 -right-2 bg-rose-600 text-white text-[10px] leading-none font-bold rounded-full px-1.5 py-0.5">
+                  {pastUnpaid.length}
+                </span>
+              )}
+            </span>
+            חייבים
           </button>
         </nav>
       </div>

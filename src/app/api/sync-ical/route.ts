@@ -1,134 +1,186 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { timingSafeEqual } from "crypto";
 
-// 🚨 הגדר כאן את מספר הטלפון האישי שלך כדי שהמערכת תתעלם ממנו בסנכרון
-const MY_PHONE_NUMBER = "0526116628"; // שנה למספר הטלפון שלך
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// כמה ימים אחורה לחפש תור שלא שולם (0 = רק תורים של היום, בדיוק לפי הדרישה).
+// אפשר להגדיל בהמשך (למשל 14) כדי שתשלום "למחרת" יסומן אוטומטית גם הוא.
+const LOOKBACK_DAYS = 0;
+
+// ---- BEGIN PURE HELPERS ----
+// חייב להישאר זהה ל-page.tsx (cleanClientName + SHOP_NAME_PREFIXES)
+const SHOP_NAME_PREFIXES: string[] = ["[jordiko barbershop]", "jordiko barbershop"];
+
+const cleanClientName = (name: string): string => {
+  const original = (name || "").trim();
+  let result = original;
+  for (const prefix of SHOP_NAME_PREFIXES) {
+    const p = prefix.trim().toLowerCase();
+    if (p && result.toLowerCase().startsWith(p)) {
+      result = result.substring(p.length).replace(/^[\s\-–—:|]+/, "");
+    }
+  }
+  result = result.replace(/^\s*\[[^\]]*\]\s*[-–—:|]*\s*/, "");
+  const parts = result
+    .split(/\s+[-–—]\s+|\s*[:|]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : original;
+};
+
+// הסרת תווי כיווניות בלתי נראים שמופיעים לפעמים בהודעות עברית
+const stripInvisible = (s: string): string =>
+  s.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+
+// מפתח השוואה לשם: אותיות קטנות, בלי פיסוק, בלי חשיבות לסדר המילים
+const normalizeNameForMatch = (name: string): string =>
+  stripInvisible(name)
+    .toLowerCase()
+    .replace(/["'״׳`’”“.,\-–—_()\[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .sort()
+    .join(" ");
+
+// פענוח הודעת ביט:
+// "70.0 ש"ח מחכים לך מיוסי כהן" -> { name: "יוסי כהן", amount: 70 }
+const parseBitSms = (raw: string): { name: string; amount: number } | null => {
+  const text = stripInvisible(raw).replace(/\r/g, "");
+  const NUM = "(\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)";
+  const amountMatch =
+    text.match(new RegExp(NUM + "\\s*(?:ש[\"״”'׳]?ח|₪)")) ||
+    text.match(new RegExp("₪\\s*" + NUM));
+  // האות "מ" שאחרי "מחכים לך" היא מילת היחס "מ" (מיוסי = מ + יוסי)
+  const nameMatch = text.match(/מחכים\s+לך\s+מ([^\n]+?)\s*(?=\n|\s+באפליקציית|$)/);
+  if (!amountMatch || !nameMatch) return null;
+
+  const amount = Number(amountMatch[1].replace(/,/g, ""));
+  const name = nameMatch[1].trim();
+  if (!Number.isFinite(amount) || amount <= 0 || !name) return null;
+  return { name, amount };
+};
+// ---- END PURE HELPERS ----
+
+const safeEqual = (a: string, b: string): boolean => {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+};
+
+const json = (body: Record<string, unknown>, status: number) =>
+  NextResponse.json(body, { status });
 
 export async function POST(req: Request) {
   try {
-    const { icalUrl } = await req.json();
+    const secret = process.env.BIT_WEBHOOK_SECRET;
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    if (!icalUrl || !icalUrl.startsWith("http")) {
-      return NextResponse.json({ 
-        success: false, 
-        error: "קישור iCal לא תקין או ריק" 
-      }, { status: 400 });
+    if (!secret || !supabaseUrl || !serviceKey) {
+      console.error("[bit-webhook] missing environment variables");
+      return json({ success: false, error: "server_not_configured" }, 500);
     }
 
-    const res = await fetch(icalUrl, { cache: "no-store" });
-    if (!res.ok) {
-      return NextResponse.json({ 
-        success: false, 
-        error: `שגיאה בגישה ליומן גוגל (סטטוס ${res.status}).` 
-      }, { status: 500 });
+    // אימות: Authorization: Bearer <BIT_WEBHOOK_SECRET>
+    const authHeader = req.headers.get("authorization") || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+    if (!token || !safeEqual(token, secret)) {
+      console.warn("[bit-webhook] unauthorized request");
+      return json({ success: false, error: "unauthorized" }, 401);
     }
 
-    const rawIcsText = await res.text();
-    // 🛠️ איחוד שורות שנחצו בפורמט iCal (RFC 5545 Unfolding) - פותר גילוי טלפונים שנשברו באמצע
-    const icsText = rawIcsText.replace(/\r?\n[ \t]/g, "");
-
-    const vevents = icsText.split("BEGIN:VEVENT");
-    const rawEventsCount = vevents.length - 1;
-
-    if (rawEventsCount === 0) {
-      return NextResponse.json({ 
-        success: true, 
-        count: 0, 
-        rawEventsCount: 0, 
-        message: "אין אירועים ביומן." 
-      });
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return json({ success: false, error: "invalid_json" }, 400);
     }
 
-    const events: Array<{ name: string; date: string; time: string; phone: string; service: string }> = [];
-    const cleanMyPhone = MY_PHONE_NUMBER.replace(/[^\d]/g, "");
-
-    for (let i = 1; i < vevents.length; i++) {
-      const block = vevents[i].split("END:VEVENT")[0];
-
-      const summaryMatch = block.match(/SUMMARY:(.*)/);
-      const dtstartMatch = block.match(/DTSTART(?:;[^:]*)?:(\d{8}T\d{6}Z?|\d{8})/);
-      const descriptionMatch = block.match(/DESCRIPTION:([\s\S]*?)(?=\r?\n[A-Z-]+:|$)/);
-
-      if (summaryMatch && dtstartMatch) {
-        let rawName = summaryMatch[1].trim().replace(/\\,/g, ",").replace(/\\/g, "");
-        const rawDate = dtstartMatch[1];
-
-        let year = rawDate.substring(0, 4);
-        let month = rawDate.substring(4, 6);
-        let day = rawDate.substring(6, 8);
-        let hours = "12";
-        let minutes = "00";
-
-        let formattedDate = `${year}-${month}-${day}`;
-        let formattedTime = `${hours}:${minutes}`;
-
-        if (rawDate.includes("T")) {
-          const timePart = rawDate.split("T")[1];
-          hours = timePart.substring(0, 2);
-          minutes = timePart.substring(2, 4);
-          formattedTime = `${hours}:${minutes}`;
-
-          if (rawDate.endsWith("Z")) {
-            const utcDate = new Date(
-              Date.UTC(
-                Number(year),
-                Number(month) - 1,
-                Number(day),
-                Number(hours),
-                Number(minutes)
-              )
-            );
-
-            // המרה מפורשת לשעון ישראל בלבד (Asia/Jerusalem)
-            formattedDate = utcDate.toLocaleDateString("en-CA", {
-              timeZone: "Asia/Jerusalem",
-            });
-
-            formattedTime = utcDate.toLocaleTimeString("he-IL", {
-              timeZone: "Asia/Jerusalem",
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: false,
-            });
-          }
-        }
-
-        let phone = "";
-        if (descriptionMatch) {
-          const cleanDesc = descriptionMatch[1].replace(/\\n/g, " ").replace(/\\/g, "");
-          const foundPhones = cleanDesc.match(/(?:05\d[ -]?\d{7}|\+?972[ -]?5\d[ -]?\d{7}|\b0\d{8,9}\b)/g) || [];
-
-          const clientPhone = foundPhones.find(p => {
-            const cleaned = p.replace(/[^\d]/g, "");
-            return cleanMyPhone !== "" && !cleaned.includes(cleanMyPhone) && !cleanMyPhone.includes(cleaned);
-          });
-
-          if (clientPhone) {
-            phone = clientPhone.replace(/[^\d]/g, "");
-          }
-        }
-
-        events.push({
-          name: rawName || "לקוח גוגל",
-          date: formattedDate,
-          time: formattedTime,
-          phone: phone,
-          service: "תספורת"
-        });
-      }
+    const smsText = (body as { smsText?: unknown } | null)?.smsText;
+    if (typeof smsText !== "string" || !smsText.trim() || smsText.length > 2000) {
+      return json({ success: false, error: "invalid_sms_text" }, 400);
     }
 
-    return NextResponse.json({ 
-      success: true, 
-      rawEventsCount, 
-      count: events.length, 
-      events 
+    const parsed = parseBitSms(smsText);
+    if (!parsed) {
+      console.warn("[bit-webhook] could not parse SMS (not a Bit payment message?)");
+      return json({ success: false, error: "parse_failed" }, 422);
+    }
+    console.log("[bit-webhook] parsed SMS", { name: parsed.name, amount: parsed.amount });
+
+    // תאריך היום לפי שעון ישראל (השרת רץ ב-UTC)
+    const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+    const fromDate = new Date(`${todayStr}T12:00:00Z`);
+    fromDate.setUTCDate(fromDate.getUTCDate() - LOOKBACK_DAYS);
+    const fromStr = fromDate.toISOString().slice(0, 10);
+
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
     });
 
-  } catch (err: any) {
-    console.error("iCal Sync Error:", err);
-    return NextResponse.json({ 
-      success: false, 
-      error: `שגיאת השרת: ${err.message || "תקלה בפיענוח"}` 
-    }, { status: 500 });
+    const { data, error } = await supabase
+      .from("appointments")
+      .select("id, name, time, price, paid, phone, date")
+      .gte("date", fromStr)
+      .lte("date", todayStr)
+      .eq("paid", false);
+
+    if (error) {
+      console.error("[bit-webhook] database read error:", error.message);
+      return json({ success: false, error: "db_read_error" }, 500);
+    }
+
+    // התאמה קפדנית: אותו שם (אחרי ניקוי כותרת היומן) וגם אותו סכום
+    const senderKey = normalizeNameForMatch(parsed.name);
+    const matches = (data ?? []).filter(
+      (a) =>
+        normalizeNameForMatch(cleanClientName(a.name || "")) === senderKey &&
+        Math.abs((Number(a.price) || 0) - parsed.amount) < 0.01
+    );
+
+    if (matches.length === 0) {
+      console.warn("[bit-webhook] no matching unpaid appointment", {
+        name: parsed.name,
+        amount: parsed.amount,
+        unpaidChecked: (data ?? []).length,
+      });
+      return json({ success: false, error: "no_match" }, 404);
+    }
+
+    if (matches.length > 1) {
+      console.warn("[bit-webhook] ambiguous match, nothing updated", {
+        name: parsed.name,
+        amount: parsed.amount,
+        candidates: matches.map((m) => m.id),
+      });
+      return json({ success: false, error: "ambiguous_match", candidates: matches.length }, 409);
+    }
+
+    const target = matches[0];
+    const { data: updated, error: updateError } = await supabase
+      .from("appointments")
+      .update({ paid: true })
+      .eq("id", target.id)
+      .eq("paid", false) // הגנה מפני עדכון כפול
+      .select()
+      .maybeSingle();
+
+    if (updateError) {
+      console.error("[bit-webhook] database update error:", updateError.message);
+      return json({ success: false, error: "db_update_error" }, 500);
+    }
+    if (!updated) {
+      return json({ success: false, error: "already_paid" }, 409);
+    }
+
+    console.log("[bit-webhook] marked as paid", { id: updated.id, date: updated.date, time: updated.time });
+    return json({ success: true, appointment: updated }, 200);
+  } catch (err) {
+    console.error("[bit-webhook] unexpected error:", err instanceof Error ? err.message : err);
+    return json({ success: false, error: "internal_error" }, 500);
   }
 }
