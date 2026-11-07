@@ -1,0 +1,123 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+// מחזיר את התאריך של היום בפורמט YYYY-MM-DD לפי שעון ישראל
+function getLocalTodayStr(): string {
+  const now = new Date();
+  const israelDate = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
+  const yyyy = israelDate.getFullYear();
+  const mm = String(israelDate.getMonth() + 1).padStart(2, "0");
+  const dd = String(israelDate.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// ניקוי שם המספרה מתוך שם הלקוח
+function cleanClientName(name: string): string {
+  if (!name) return "";
+  let cleaned = name.replace(/^\[.*?\]\s*/, "");
+  const delimiters = [" - ", " – ", " — ", ": ", " | "];
+  for (const delim of delimiters) {
+    if (cleaned.includes(delim)) {
+      const parts = cleaned.split(delim);
+      cleaned = parts[parts.length - 1];
+    }
+  }
+  return cleaned.trim();
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    // 1. אימות טוקן אבטחה ב-Header
+    const authHeader = req.headers.get("authorization");
+    const secret = process.env.BIT_WEBHOOK_SECRET;
+
+    if (!secret || authHeader !== `Bearer ${secret}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // 2. קריאת תוכן ה-SMS
+    const body = await req.json();
+    const smsText = body.smsText;
+
+    if (!smsText || typeof smsText !== "string") {
+      return NextResponse.json({ error: "Missing or invalid smsText" }, { status: 400 });
+    }
+
+    // 3. חילוץ סכום ושם מתוך הודעת ה-SMS של Bit
+    const amountMatch = smsText.match(/₪\s*([\d,]+(?:\.\d+)?)/) || smsText.match(/([\d,]+(?:\.\d+)?)\s*₪/);
+    const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, "")) : null;
+
+    let extractedName: string | null = null;
+    const fromMatch = smsText.match(/מ-([א-ת\s]+)(?:\s+ב-bit|\s+במיזם|$)/) || 
+                       smsText.match(/([א-ת\s]+)\s+העביר\/ה/);
+    
+    if (fromMatch) {
+      extractedName = fromMatch[1].trim();
+    }
+
+    if (!amount || !extractedName) {
+      return NextResponse.json({ error: "Could not parse SMS details", parsed: { amount, extractedName } }, { status: 422 });
+    }
+
+    // 4. התחברות ל-Supabase בעזרת מפתח Service Role
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      return NextResponse.json({ error: "Supabase environment variables missing" }, { status: 500 });
+    }
+
+    const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+    // 5. שליפת תורים שלא שולמו מהיום בלבד
+    const todayStr = getLocalTodayStr();
+    const { data: appointments, error: fetchError } = await supabase
+      .from("appointments")
+      .select("*")
+      .eq("date", todayStr)
+      .eq("paid", false);
+
+    if (fetchError) {
+      return NextResponse.json({ error: "Database query failed", details: fetchError }, { status: 500 });
+    }
+
+    if (!appointments || appointments.length === 0) {
+      return NextResponse.json({ message: "No unpaid appointments today", matched: false }, { status: 404 });
+    }
+
+    // 6. התאמה מדויקת בין השם והסכום מה-SMS לתור במסד הנתונים
+    const matches = appointments.filter((app) => {
+      const cleanAppName = cleanClientName(app.name).toLowerCase();
+      const smsName = extractedName!.toLowerCase();
+      
+      const appPrice = Number(app.price);
+      const isPriceMatch = Math.abs(appPrice - amount) < 0.01;
+      const isNameMatch = cleanAppName.includes(smsName) || smsName.includes(cleanAppName);
+
+      return isPriceMatch && isNameMatch;
+    });
+
+    if (matches.length === 0) {
+      return NextResponse.json({ message: "No matching appointment found for name/amount", matched: false }, { status: 404 });
+    }
+
+    if (matches.length > 1) {
+      return NextResponse.json({ message: "Multiple matching appointments found. Manual confirmation needed.", matched: false }, { status: 409 });
+    }
+
+    // 7. עדכון התור כמשולם (`paid: true`)
+    const matchedApp = matches[0];
+    const { error: updateError } = await supabase
+      .from("appointments")
+      .update({ paid: true })
+      .eq("id", matchedApp.id);
+
+    if (updateError) {
+      return NextResponse.json({ error: "Failed to update appointment", details: updateError }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, updatedAppointment: matchedApp });
+  } catch (err: any) {
+    return NextResponse.json({ error: "Internal server error", message: err.message }, { status: 500 });
+  }
+}

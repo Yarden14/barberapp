@@ -276,12 +276,30 @@ export default function Home() {
     setIsEditingDefaultPrice(false);
   };
 
+  // Supabase מחזיר כברירת מחדל עד 1000 שורות בלבד - לכן קוראים בדפים עד שנגמרות השורות
+  const fetchAllAppointmentRows = async (
+    columns: string
+  ): Promise<{ data: any[] | null; error: any }> => {
+    const PAGE_SIZE = 1000;
+    let all: any[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = (await supabase
+        .from("appointments")
+        .select(columns)
+        .order("time", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, from + PAGE_SIZE - 1)) as unknown as { data: any[] | null; error: any };
+
+      if (error) return { data: null, error };
+      all = all.concat(data || []);
+      if (!data || data.length < PAGE_SIZE) break;
+    }
+    return { data: all, error: null };
+  };
+
   const fetchAppointments = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("appointments")
-      .select("*")
-      .order("time", { ascending: true });
+    const { data, error } = await fetchAllAppointmentRows("*");
 
     if (error) {
       console.error("שגיאה במשיכת נתונים:", error);
@@ -339,91 +357,158 @@ const parseIcalToIsraelTime = (dtStr: string) => {
 
    return { dateStr, timeStr };
  };
+  // הכנסת תורים חדשים בצורה בטוחה: שורה בעייתית אחת לא מפילה את כל הסנכרון
+  const insertNewAppointments = async (rows: any[]) => {
+    // ניסיון ראשון: הכנסה מרוכזת שמתעלמת מכפילויות (דורש UNIQUE על name,date,time)
+    const { error: batchErr } = await supabase
+      .from("appointments")
+      .upsert(rows, { onConflict: "name,date,time", ignoreDuplicates: true });
+
+    if (!batchErr) {
+      return { inserted: rows.length, duplicates: 0, failed: 0, firstError: null as string | null };
+    }
+
+    console.error("[sync] הכנסה מרוכזת נכשלה, עוברים להכנסה בחלקים:", batchErr);
+
+    let inserted = 0;
+    let duplicates = 0;
+    let failed = 0;
+    let firstError: string | null = null;
+
+    const CHUNK_SIZE = 100;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const { error: chunkErr } = await supabase.from("appointments").insert(chunk);
+      if (!chunkErr) {
+        inserted += chunk.length;
+        continue;
+      }
+
+      // חלק נכשל - מנסים שורה-שורה כדי לדעת בדיוק איזו שורה בעייתית
+      console.error("[sync] הכנסת חלק נכשלה, מנסים שורה-שורה:", chunkErr);
+      for (const row of chunk) {
+        const { error: rowErr } = await supabase.from("appointments").insert([row]);
+        if (!rowErr) {
+          inserted += 1;
+        } else if (rowErr.code === "23505") {
+          duplicates += 1; // כבר קיים - לא שגיאה
+        } else {
+          failed += 1;
+          if (!firstError) firstError = rowErr.message;
+          console.error("[sync] הכנסת שורה נכשלה:", {
+            name: row.name,
+            date: row.date,
+            time: row.time,
+            error: rowErr,
+          });
+        }
+      }
+    }
+
+    return { inserted, duplicates, failed, firstError };
+  };
+
   const autoSyncFromGCal = async (urlToSync: string, isManual: boolean = false) => {
     if (!urlToSync) {
       if (isManual) alert("אנא הזן קישור iCal בהגדרות תחילה.");
       return;
     }
     setIsSyncing(true);
+    let stage = "start";
 
     try {
+      // שלב 1: משיכת האירועים מהיומן דרך השרת
+      stage = "fetch-ical";
       const response = await fetch("/api/sync-ical", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ icalUrl: urlToSync })
       });
 
-      const resData = await response.json();
-
-      if (!resData.success) {
-        alert(`❌ שגיאה בסנכרון:\n${resData.error}`);
-        setIsSyncing(false);
+      let resData: any = null;
+      try {
+        resData = await response.json();
+      } catch (jsonErr) {
+        console.error("[sync] שלב fetch-ical: תשובת השרת אינה JSON תקין", { status: response.status, jsonErr });
+        alert("❌ שגיאה בסנכרון: השרת החזיר תשובה לא תקינה.");
         return;
       }
 
-      if (resData.count === 0) {
+      if (!resData || !resData.success) {
+        console.error("[sync] שלב fetch-ical: השרת החזיר שגיאה", resData);
+        alert(`❌ שגיאה בסנכרון:\n${resData?.error || "שגיאה לא ידועה"}`);
+        return;
+      }
+
+      const events: any[] = Array.isArray(resData.events) ? resData.events : [];
+      if (events.length === 0) {
         if (isManual) alert(`ℹ️ גוגל לא החזיר תורים ביומן הזה.`);
-        setIsSyncing(false);
         return;
       }
 
-      const { data: existingApps, error: fetchErr } = await supabase
-        .from("appointments")
-        .select("name, date, time");
-
+      // שלב 2: טעינת התורים הקיימים (בדפים, כדי לא להיעצר ב-1000 שורות)
+      stage = "load-existing";
+      const { data: existingApps, error: fetchErr } = await fetchAllAppointmentRows("name, date, time");
       if (fetchErr) {
+        console.error("[sync] שלב load-existing: שגיאה בקריאה מ-Supabase", fetchErr);
         alert(`❌ שגיאה בחיבור ל-Supabase:\n${fetchErr.message}`);
-        setIsSyncing(false);
         return;
       }
+
+      // שלב 3: בניית רשימת התורים החדשים בלבד
+      stage = "prepare";
+      const keyOf = (name: string, date: string, time: string) =>
+        `${(name || "").trim().toLowerCase()}_${date}_${time}`;
 
       const existingSet = new Set(
-        (existingApps || []).map((a: any) => `${a.name.trim().toLowerCase()}_${a.date}_${a.time}`)
+        (existingApps || []).map((a: any) => keyOf(a.name, a.date, a.time))
       );
       const modifiedKeysSet = new Set(getModifiedGCalKeys());
 
+      const validEvents = events.filter((evt: any) => evt && evt.date && evt.time);
+      if (validEvents.length !== events.length) {
+        console.warn(`[sync] דילוג על ${events.length - validEvents.length} אירועים ללא תאריך/שעה תקינים`);
+      }
+
       const uniqueEventsMap = new Map<string, any>();
-      resData.events.forEach((evt: any) => {
-        const cleanName = evt.name.trim().toLowerCase();
-        const key = `${cleanName}_${evt.date}_${evt.time}`;
+      validEvents.forEach((evt: any) => {
+        const key = keyOf(evt.name, evt.date, evt.time);
         if (!uniqueEventsMap.has(key)) {
           uniqueEventsMap.set(key, evt);
         }
       });
 
-      const uniqueEvents = Array.from(uniqueEventsMap.values());
-
-      const newToInsert = uniqueEvents
-        .filter((evt: any) => {
-          const key = `${evt.name.trim().toLowerCase()}_${evt.date}_${evt.time}`;
-          return !existingSet.has(key) && !modifiedKeysSet.has(key);
-        })
-        .map((evt: any) => ({
+      const newToInsert = Array.from(uniqueEventsMap.entries())
+        .filter(([key]) => !existingSet.has(key) && !modifiedKeysSet.has(key))
+        .map(([, evt]) => ({
           id: crypto.randomUUID(),
-          name: evt.name.trim(),
+          name: (evt.name || "לקוח גוגל").trim(),
           date: evt.date,
           time: evt.time,
-          service: evt.service,
+          service: evt.service || "תספורת",
           price: defaultPrice,
           paid: false,
-          phone: evt.phone
+          phone: evt.phone || ""
         }));
 
-      if (newToInsert.length > 0) {
-        const { error: insertErr } = await supabase
-          .from("appointments")
-          .upsert(newToInsert, { onConflict: "name,date,time", ignoreDuplicates: true });
-        if (insertErr) {
-          alert(`❌ שגיאה בהכנסת תורים ל-Supabase:\n${insertErr.message}`);
-        } else {
-          if (isManual) alert(`✅ סונכרנו בהצלחה ${newToInsert.length} תורים חדשים מגוגל!`);
-        }
-      } else {
+      // שלב 4: הכנסה ל-Supabase (תורים קיימים/ששולמו לא נוגעים בהם)
+      stage = "insert";
+      if (newToInsert.length === 0) {
         if (isManual) alert(`👍 כל התורים מגוגל כבר מעודכנים באפליקציה.`);
+        return;
       }
 
+      const result = await insertNewAppointments(newToInsert);
+      console.log("[sync] תוצאת הכנסה:", result);
+
+      if (result.failed > 0) {
+        alert(`⚠️ סונכרנו ${result.inserted} תורים, אבל ${result.failed} נכשלו.\n${result.firstError || ""}`);
+      } else if (isManual) {
+        alert(`✅ סונכרנו בהצלחה ${result.inserted} תורים חדשים מגוגל!`);
+      }
     } catch (err: any) {
-      alert(`❌ שגיאה בלתי צפויה: ${err.message}`);
+      console.error(`[sync] שגיאה בלתי צפויה בשלב "${stage}":`, err);
+      alert(`❌ שגיאה בלתי צפויה בסנכרון (שלב: ${stage}):\n${err?.message || err}`);
     } finally {
       setIsSyncing(false);
       fetchAppointments();
