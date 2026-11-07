@@ -48,6 +48,50 @@ const formatDateToYMD = (d: Date) => {
   return `${y}-${m}-${day}`;
 };
 
+// ---- דיווח שגיאות סנכרון מפורט ----
+const buildSyncErrorMessage = (p: {
+  source: string;
+  status?: number | null;
+  code?: string | null;
+  message?: string;
+  hint?: string;
+}): string => {
+  const lines = ["❌ הסנכרון נכשל", `📍 מקור: ${p.source}`];
+  if (p.status) lines.push(`🔢 קוד HTTP: ${p.status}`);
+  if (p.code) lines.push(`🏷️ קוד שגיאה: ${p.code}`);
+  if (p.message) lines.push(`💬 ${p.message}`);
+  if (p.hint) lines.push(`💡 ${p.hint}`);
+  return lines.join("\n");
+};
+
+const reportSyncFailure = (info: {
+  source: string;
+  status?: number | null;
+  code?: string | null;
+  message?: string;
+  hint?: string;
+}) => {
+  console.error("[sync] FAILURE", info);
+  alert(buildSyncErrorMessage(info));
+};
+
+const supabaseErrorHint = (
+  status: number | null | undefined,
+  code: string | null | undefined,
+  message: string
+): string | undefined => {
+  if (status === 401 || /invalid api key|no api key|jwt/i.test(message)) {
+    return "Supabase דחה את מפתח ה-anon. בדוק ב-Vercel שהמשתנה NEXT_PUBLIC_SUPABASE_ANON_KEY הוא מפתח ה-anon/publishable (לא service_role), בלי רווחים, ופרוס מחדש.";
+  }
+  if (code === "42501" || /row-level security/i.test(message)) {
+    return "מדיניות RLS ב-Supabase חוסמת את הפעולה. ודא שיש מדיניות שמאפשרת SELECT ו-INSERT על הטבלה appointments.";
+  }
+  if (code === "42P10") {
+    return "חסר אילוץ UNIQUE על (name, date, time). הרץ את ה-SQL של מניעת כפילויות.";
+  }
+  return undefined;
+};
+
 // המרת מספר טלפון ישראלי לפורמט בינלאומי (05X... -> 9725X...)
 const normalizeIsraeliPhone = (phone: string): string => {
   let digits = (phone || "").replace(/\D/g, "");
@@ -279,18 +323,18 @@ export default function Home() {
   // Supabase מחזיר כברירת מחדל עד 1000 שורות בלבד - לכן קוראים בדפים עד שנגמרות השורות
   const fetchAllAppointmentRows = async (
     columns: string
-  ): Promise<{ data: any[] | null; error: any }> => {
+  ): Promise<{ data: any[] | null; error: any; status?: number }> => {
     const PAGE_SIZE = 1000;
     let all: any[] = [];
     for (let from = 0; ; from += PAGE_SIZE) {
-      const { data, error } = (await supabase
+      const { data, error, status } = (await supabase
         .from("appointments")
         .select(columns)
         .order("time", { ascending: true })
         .order("id", { ascending: true })
-        .range(from, from + PAGE_SIZE - 1)) as unknown as { data: any[] | null; error: any };
+        .range(from, from + PAGE_SIZE - 1)) as unknown as { data: any[] | null; error: any; status: number };
 
-      if (error) return { data: null, error };
+      if (error) return { data: null, error, status };
       all = all.concat(data || []);
       if (!data || data.length < PAGE_SIZE) break;
     }
@@ -359,21 +403,33 @@ const parseIcalToIsraelTime = (dtStr: string) => {
  };
   // הכנסת תורים חדשים בצורה בטוחה: שורה בעייתית אחת לא מפילה את כל הסנכרון
   const insertNewAppointments = async (rows: any[]) => {
+    type InsertErrorInfo = { status: number | null; code: string | null; message: string };
+
     // ניסיון ראשון: הכנסה מרוכזת שמתעלמת מכפילויות (דורש UNIQUE על name,date,time)
-    const { error: batchErr } = await supabase
+    const { error: batchErr, status: batchStatus } = await supabase
       .from("appointments")
       .upsert(rows, { onConflict: "name,date,time", ignoreDuplicates: true });
 
     if (!batchErr) {
-      return { inserted: rows.length, duplicates: 0, failed: 0, firstError: null as string | null };
+      return { inserted: rows.length, duplicates: 0, failed: 0, firstError: null as InsertErrorInfo | null };
     }
 
-    console.error("[sync] הכנסה מרוכזת נכשלה, עוברים להכנסה בחלקים:", batchErr);
+    console.error("[sync] הכנסה מרוכזת נכשלה:", { status: batchStatus, error: batchErr });
+
+    // שגיאת הרשאות/מפתח - אין טעם לנסות שוב שורה-שורה
+    if (batchStatus === 401 || batchStatus === 403 || batchErr.code === "42501") {
+      return {
+        inserted: 0,
+        duplicates: 0,
+        failed: rows.length,
+        firstError: { status: batchStatus ?? null, code: batchErr.code ?? null, message: batchErr.message },
+      };
+    }
 
     let inserted = 0;
     let duplicates = 0;
     let failed = 0;
-    let firstError: string | null = null;
+    let firstError: InsertErrorInfo | null = null;
 
     const CHUNK_SIZE = 100;
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
@@ -387,18 +443,21 @@ const parseIcalToIsraelTime = (dtStr: string) => {
       // חלק נכשל - מנסים שורה-שורה כדי לדעת בדיוק איזו שורה בעייתית
       console.error("[sync] הכנסת חלק נכשלה, מנסים שורה-שורה:", chunkErr);
       for (const row of chunk) {
-        const { error: rowErr } = await supabase.from("appointments").insert([row]);
+        const { error: rowErr, status: rowStatus } = await supabase.from("appointments").insert([row]);
         if (!rowErr) {
           inserted += 1;
         } else if (rowErr.code === "23505") {
           duplicates += 1; // כבר קיים - לא שגיאה
         } else {
           failed += 1;
-          if (!firstError) firstError = rowErr.message;
+          if (!firstError) {
+            firstError = { status: rowStatus ?? null, code: rowErr.code ?? null, message: rowErr.message };
+          }
           console.error("[sync] הכנסת שורה נכשלה:", {
             name: row.name,
             date: row.date,
             time: row.time,
+            status: rowStatus,
             error: rowErr,
           });
         }
@@ -416,27 +475,74 @@ const parseIcalToIsraelTime = (dtStr: string) => {
     setIsSyncing(true);
     let stage = "start";
 
+    // רק שם השרת של הקישור (בלי הנתיב הסודי) - להצגה בשגיאות
+    let icalHost = "";
     try {
-      // שלב 1: משיכת האירועים מהיומן דרך השרת
-      stage = "fetch-ical";
+      icalHost = new URL(urlToSync).host;
+    } catch {
+      icalHost = "";
+    }
+
+    try {
+      // שלב 1: הדפדפן פונה לשרת של האפליקציה (/api/sync-ical), והשרת הוא שמושך את קובץ ה-iCal מגוגל
+      stage = "app-api";
       const response = await fetch("/api/sync-ical", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ icalUrl: urlToSync })
       });
 
+      const rawBody = await response.text();
       let resData: any = null;
       try {
-        resData = await response.json();
-      } catch (jsonErr) {
-        console.error("[sync] שלב fetch-ical: תשובת השרת אינה JSON תקין", { status: response.status, jsonErr });
-        alert("❌ שגיאה בסנכרון: השרת החזיר תשובה לא תקינה.");
+        resData = JSON.parse(rawBody);
+      } catch {
+        resData = null;
+      }
+
+      // תשובה שאינה JSON - לא הגיעה מקוד הסנכרון שלנו (למשל דף חסימה של Vercel)
+      if (resData === null) {
+        const snippet = rawBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+        const blocked = response.status === 401 || response.status === 403;
+        reportSyncFailure({
+          source: "שרת האפליקציה (Vercel) - הבקשה ל-/api/sync-ical",
+          status: response.status,
+          message: snippet || "תשובה ריקה או שאינה JSON",
+          hint: blocked
+            ? "הבקשה נחסמה לפני שהגיעה לקוד הסנכרון. בדוק ב-Vercel: Settings > Deployment Protection (כבה Vercel Authentication, או היכנס דרך הדומיין הראשי)."
+            : undefined,
+        });
         return;
       }
 
-      if (!resData || !resData.success) {
-        console.error("[sync] שלב fetch-ical: השרת החזיר שגיאה", resData);
-        alert(`❌ שגיאה בסנכרון:\n${resData?.error || "שגיאה לא ידועה"}`);
+      if (!resData.success) {
+        const errText = String(resData.error || "שגיאה לא ידועה");
+
+        // {success:false, error:"unauthorized"} הוא בדיוק מה שמחזיר קוד ה-Bit webhook
+        if (errText.toLowerCase() === "unauthorized") {
+          reportSyncFailure({
+            source: "הקובץ src/app/api/sync-ical/route.ts - התשובה הזו מגיעה מקוד ה-Bit webhook",
+            status: response.status,
+            message: errText,
+            hint: "קוד ה-webhook דורש כותרת Authorization. כנראה קובץ ה-route של ה-webhook נשמר בטעות בתיקייה api/sync-ical במקום api/bit-webhook. החזר לשם את קובץ הסנכרון המקורי.",
+          });
+          return;
+        }
+
+        const looksLikeGoogle = /גוגל|google/i.test(errText);
+        const upstream = errText.match(/סטטוס\s*(\d{3})/);
+        const upstreamStatus = upstream ? Number(upstream[1]) : null;
+        reportSyncFailure({
+          source: looksLikeGoogle
+            ? `Google Calendar - השרת ניסה למשוך את קובץ ה-iCal מ-${icalHost || "הקישור שהוזן"}`
+            : "שרת האפליקציה - /api/sync-ical",
+          status: upstreamStatus ?? response.status,
+          message: errText,
+          hint:
+            looksLikeGoogle && upstreamStatus !== null && [401, 403, 404].includes(upstreamStatus)
+              ? "גוגל לא מכיר את הקישור. הדבק מחדש את 'הכתובת הסודית בפורמט iCal' בהגדרות (אחרי איפוס הכתובת ביומן, הקישור הישן מפסיק לעבוד)."
+              : undefined,
+        });
         return;
       }
 
@@ -447,11 +553,17 @@ const parseIcalToIsraelTime = (dtStr: string) => {
       }
 
       // שלב 2: טעינת התורים הקיימים (בדפים, כדי לא להיעצר ב-1000 שורות)
-      stage = "load-existing";
-      const { data: existingApps, error: fetchErr } = await fetchAllAppointmentRows("name, date, time");
+      stage = "supabase-read";
+      const { data: existingApps, error: fetchErr, status: readStatus } =
+        await fetchAllAppointmentRows("name, date, time");
       if (fetchErr) {
-        console.error("[sync] שלב load-existing: שגיאה בקריאה מ-Supabase", fetchErr);
-        alert(`❌ שגיאה בחיבור ל-Supabase:\n${fetchErr.message}`);
+        reportSyncFailure({
+          source: "Supabase - קריאת התורים הקיימים (טבלת appointments)",
+          status: readStatus ?? null,
+          code: fetchErr.code ?? null,
+          message: fetchErr.message,
+          hint: supabaseErrorHint(readStatus, fetchErr.code, String(fetchErr.message || "")),
+        });
         return;
       }
 
@@ -492,7 +604,7 @@ const parseIcalToIsraelTime = (dtStr: string) => {
         }));
 
       // שלב 4: הכנסה ל-Supabase (תורים קיימים/ששולמו לא נוגעים בהם)
-      stage = "insert";
+      stage = "supabase-write";
       if (newToInsert.length === 0) {
         if (isManual) alert(`👍 כל התורים מגוגל כבר מעודכנים באפליקציה.`);
         return;
@@ -501,14 +613,24 @@ const parseIcalToIsraelTime = (dtStr: string) => {
       const result = await insertNewAppointments(newToInsert);
       console.log("[sync] תוצאת הכנסה:", result);
 
-      if (result.failed > 0) {
-        alert(`⚠️ סונכרנו ${result.inserted} תורים, אבל ${result.failed} נכשלו.\n${result.firstError || ""}`);
+      if (result.failed > 0 && result.firstError) {
+        reportSyncFailure({
+          source: "Supabase - הכנסת תורים חדשים (טבלת appointments)",
+          status: result.firstError.status,
+          code: result.firstError.code,
+          message: `נוספו ${result.inserted}, נכשלו ${result.failed}. ${result.firstError.message}`,
+          hint: supabaseErrorHint(result.firstError.status, result.firstError.code, result.firstError.message),
+        });
       } else if (isManual) {
         alert(`✅ סונכרנו בהצלחה ${result.inserted} תורים חדשים מגוגל!`);
       }
     } catch (err: any) {
-      console.error(`[sync] שגיאה בלתי צפויה בשלב "${stage}":`, err);
-      alert(`❌ שגיאה בלתי צפויה בסנכרון (שלב: ${stage}):\n${err?.message || err}`);
+      const isNetwork = err instanceof TypeError && /fetch|network/i.test(String(err.message));
+      reportSyncFailure({
+        source: `שגיאה בלתי צפויה בדפדפן (שלב: ${stage})`,
+        message: String(err?.message || err),
+        hint: isNetwork ? "בעיית רשת או חסימה בדפדפן. בדוק חיבור לאינטרנט ונסה שוב." : undefined,
+      });
     } finally {
       setIsSyncing(false);
       fetchAppointments();
